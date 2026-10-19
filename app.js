@@ -9,12 +9,12 @@ let S = load();
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && s.cards) return Object.assign(blank(), s);
+    if (s && s.cards) { const b = blank(); return Object.assign(b, s, { settings: Object.assign(b.settings, s.settings) }); }
   } catch (e) {}
   return blank();
 }
 function blank() {
-  return { cards: {}, answers: [], days: {}, settings: { newPerDay: 20, typeAnswers: true } };
+  return { cards: {}, answers: [], days: {}, ratings: {}, device: Math.random().toString(36).slice(2, 8), settings: { newPerDay: 20, typeAnswers: true, ghRepo: "NoUserFound000/cadet-cards", ghToken: "" } };
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { alertBox("Could not save: storage is full or blocked."); }
@@ -170,7 +170,7 @@ function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.fl
 function review(deck) {
   if (!session || session.deck !== deck) session = { deck, queue: buildQueue(deck), done: 0 };
   const c = session.queue[0];
-  if (!c) { session = null; V.innerHTML = `<h1>Session complete</h1><div class="card">Nice work. Streak: <b>${streak()}</b> day(s).</div><button class="primary" id="back">Back to Today</button>`; document.getElementById("back").onclick = () => go("home"); return; }
+  if (!c) { session = null; if (S.settings.ghToken) sync(); V.innerHTML = `<h1>Session complete</h1><div class="card">Nice work. Streak: <b>${streak()}</b> day(s).</div><button class="primary" id="back">Back to Today</button>`; document.getElementById("back").onclick = () => go("home"); return; }
   const typing = S.settings.typeAnswers;
   V.innerHTML = `
     <div class="row eyebrow" style="margin-top:4px"><span>${esc(c.deck.split("::").pop())}</span><span>${session.queue.length} left</span></div>
@@ -236,23 +236,73 @@ function deckView() {
 function answers() {
   const list = S.answers.slice().reverse();
   const unsent = S.answers.filter(a => !a.sent);
+  const rated = Object.values(S.ratings).flat().sort((a, b) => (b.at || "").localeCompare(a.at || ""));
+  const linked = !!S.settings.ghToken;
   V.innerHTML = `
     <div class="eyebrow">For rating</div>
     <h1>Your answers</h1>
-    <p class="small">Answers you type during review are kept here so Claude can rate them.</p>
-    <button class="primary" id="copy" ${unsent.length ? "" : "disabled"}>Copy ${unsent.length} new answer(s) for Claude</button>
+    <p class="small">${linked ? "Answers you type during review are sent to Claude when you sync. Ratings come back here." : "Answers you type during review are kept here. Link GitHub in Settings to send them to Claude automatically, or copy them."}</p>
+    ${linked ? `<button class="primary" id="sync">Sync now (${unsent.length} to send)</button>` : `<button class="primary" id="copy" ${unsent.length ? "" : "disabled"}>Copy ${unsent.length} new answer(s) for Claude</button>`}
     <p id="msg" class="small"></p>
-    ${list.slice(0, 50).map(a => `<div class="card"><div class="small">${esc(a.deck)} · ${new Date(a.at).toLocaleString()} ${a.sent ? "· sent" : ""}</div>
-      <div><b>${clean(a.q)}</b></div><div>You: ${esc(a.typed)}</div></div>`).join("")}`;
-  document.getElementById("copy").onclick = async () => {
+    ${rated.length ? `<h2>Claude's ratings</h2>` + rated.slice(0, 30).map(r => `<div class="card gold"><div class="row"><b>${esc(r.q || "")}</b><span class="stat" style="font-size:22px">${esc(r.score ?? "")}/5</span></div>
+      <div class="small">You: ${esc(r.typed || "")}</div><div class="a">${esc(r.feedback || "")}${r.better ? `<br><small>Stronger answer: ${esc(r.better)}</small>` : ""}</div></div>`).join("") : ""}
+    <h2>Recent answers</h2>
+    ${list.slice(0, 50).map(a => `<div class="card"><div class="small">${esc(a.deck.split("::").pop())} · ${new Date(a.at).toLocaleString()} ${a.sent ? "· sent" : ""}</div>
+      <div><b>${clean(a.q)}</b></div><div>You: ${esc(a.typed)}</div></div>`).join("") || `<p class="small">No typed answers yet.</p>`}`;
+  const msg = t => document.getElementById("msg").textContent = t;
+  const sy = document.getElementById("sync");
+  if (sy) sy.onclick = async () => { sy.disabled = true; msg("Syncing…"); const r = await sync(); answers(); msg(r); };
+  const cp = document.getElementById("copy");
+  if (cp) cp.onclick = async () => {
     const text = "Please rate my answers:\n\n" + unsent.map((a, i) => `${i + 1}. [${a.deck}] Q: ${strip(a.q)}\n   My answer: ${a.typed}`).join("\n");
     try {
       await navigator.clipboard.writeText(text);
       unsent.forEach(a => a.sent = true); save();
       answers();
-      document.getElementById("msg").textContent = "Copied. Paste it into your Claude thread.";
-    } catch (e) { document.getElementById("msg").textContent = "Copy was blocked by the browser."; }
+      msg("Copied. Paste it into your Claude thread.");
+    } catch (e) { msg("Copy was blocked by the browser."); }
   };
+}
+
+// ---------- GitHub sync (private cards repo) ----------
+async function gh(path, opts = {}) {
+  const r = await fetch(`https://api.github.com/repos/${S.settings.ghRepo}/contents/${path}`, Object.assign({}, opts, {
+    headers: Object.assign({ Authorization: `Bearer ${S.settings.ghToken}`, Accept: "application/vnd.github+json" }, opts.headers || {}),
+    cache: "no-store",
+  }));
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GitHub said ${r.status}${r.status === 401 ? " (check the access key)" : ""}`);
+  return r;
+}
+const b64 = str => btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+async function sync() {
+  if (!S.settings.ghToken) return "Link GitHub in Settings first.";
+  if (!navigator.onLine) return "You're offline. Your answers will send next time you sync.";
+  try {
+    let decksN = 0, sent = 0, newRatings = 0;
+    const dl = await gh("decks");
+    for (const f of dl ? await dl.json() : []) {
+      if (!/\.txt$/.test(f.name)) continue;
+      const r = await gh(f.path, { headers: { Accept: "application/vnd.github.raw+json" } });
+      if (r) { importAnkiText(await r.text(), f.name.replace(/\.\w+$/, "")); decksN++; }
+    }
+    const unsent = S.answers.filter(a => !a.sent);
+    if (unsent.length) {
+      const name = `answers/${new Date().toISOString().replace(/[:.]/g, "-")}-${S.device}.json`;
+      const payload = unsent.map(a => ({ deck: a.deck, q: strip(a.q), model: strip(a.model), typed: a.typed, grade: a.grade, at: a.at }));
+      await gh(name, { method: "PUT", body: JSON.stringify({ message: `Answers from ${S.device}`, content: b64(JSON.stringify(payload, null, 1)) }) });
+      unsent.forEach(a => a.sent = true); sent = unsent.length;
+    }
+    const rl = await gh("ratings");
+    for (const f of rl ? await rl.json() : []) {
+      if (!/\.json$/.test(f.name) || S.ratings[f.sha]) continue;
+      const r = await gh(f.path, { headers: { Accept: "application/vnd.github.raw+json" } });
+      if (r) { try { S.ratings[f.sha] = JSON.parse(await r.text()); newRatings++; } catch (e) {} }
+    }
+    S.lastSync = new Date().toISOString();
+    save();
+    return `Synced: ${decksN} decks updated, ${sent} answers sent, ${newRatings} new rating sets.`;
+  } catch (e) { return "Sync failed: " + e.message; }
 }
 const strip = h => { const d = document.createElement("div"); d.innerHTML = clean(h); return d.textContent; };
 
@@ -264,6 +314,17 @@ function settings() {
       <label class="small">New cards per day</label>
       <input type="text" inputmode="numeric" id="npd" value="${S.settings.newPerDay}">
       <label class="chk"><input type="checkbox" id="ta" ${S.settings.typeAnswers ? "checked" : ""}> Show an answer box during review</label>
+    </div>
+    <h2>GitHub sync</h2>
+    <div class="card">
+      <p class="small">Pulls your decks from your private repo and sends typed answers to Claude for rating. Paste your access key once on each device. It stays on this device only.</p>
+      <label class="small">Cards repo</label>
+      <input type="text" id="ghr" value="${esc(S.settings.ghRepo)}" autocapitalize="off" autocorrect="off">
+      <label class="small">Access key</label>
+      <input type="text" id="ght" value="${S.settings.ghToken ? "••••••••" + S.settings.ghToken.slice(-4) : ""}" placeholder="github_pat_…" autocapitalize="off" autocorrect="off">
+      <div style="height:8px"></div>
+      <button id="ghs">Save and sync</button>
+      <p id="gmsg" class="small">${S.lastSync ? "Last synced " + new Date(S.lastSync).toLocaleString() : ""}</p>
     </div>
     <h2>Backup</h2>
     <div class="card">
@@ -280,13 +341,23 @@ function settings() {
     a.download = `cadet-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
   };
+  document.getElementById("ghs").onclick = async () => {
+    S.settings.ghRepo = document.getElementById("ghr").value.trim();
+    const t = document.getElementById("ght").value.trim();
+    if (t && !t.startsWith("••")) S.settings.ghToken = t;
+    save();
+    document.getElementById("gmsg").textContent = "Syncing…";
+    document.getElementById("gmsg").textContent = await sync();
+  };
   let armed = false;
   document.getElementById("wipe").onclick = e => {
     if (!armed) { armed = true; e.target.textContent = "Tap again to erase everything"; return; }
     S = blank(); save(); go("home");
+if (S.settings.ghToken) sync().then(() => { if (!session && document.querySelector("nav .on").dataset.go === "home") home(); });
   };
 }
 function alertBox(msg) { const p = document.createElement("div"); p.className = "card"; p.textContent = msg; V.prepend(p); }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 go("home");
+if (S.settings.ghToken) sync().then(() => { if (!session && document.querySelector("nav .on").dataset.go === "home") home(); });
