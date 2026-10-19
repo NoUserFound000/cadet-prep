@@ -301,7 +301,11 @@ async function sync() {
     }
     S.lastSync = new Date().toISOString();
     save();
-    return `Synced: ${decksN} decks updated, ${sent} answers sent, ${newRatings} new rating sets.`;
+    // Back up this device's progress to the private repo.
+    const bp = `progress/${S.device}.json`, cur = await gh(bp);
+    const sha = cur ? (await cur.json()).sha : undefined;
+    await gh(bp, { method: "PUT", body: JSON.stringify({ message: `Progress backup from ${S.device}`, content: b64(JSON.stringify(Object.assign({}, S, { settings: Object.assign({}, S.settings, { ghToken: "" }) }))), sha }) });
+    return `Synced: ${decksN} decks updated, ${sent} answers sent, ${newRatings} new rating sets, progress backed up.`;
   } catch (e) { return "Sync failed: " + e.message; }
 }
 const strip = h => { const d = document.createElement("div"); d.innerHTML = clean(h); return d.textContent; };
@@ -323,7 +327,7 @@ function settings() {
       <label class="small">Access key</label>
       <input type="text" id="ght" value="${S.settings.ghToken ? "••••••••" + S.settings.ghToken.slice(-4) : ""}" placeholder="github_pat_…" autocapitalize="off" autocorrect="off">
       <div style="height:8px"></div>
-      <button id="ghs">Save and sync</button>
+      <div class="row"><button id="ghs">Save and sync</button><button id="ghr2">Restore progress</button></div>
       <p id="gmsg" class="small">${S.lastSync ? "Last synced " + new Date(S.lastSync).toLocaleString() : ""}</p>
     </div>
     <h2>Backup</h2>
@@ -348,6 +352,24 @@ function settings() {
     save();
     document.getElementById("gmsg").textContent = "Syncing…";
     document.getElementById("gmsg").textContent = await sync();
+  };
+  document.getElementById("ghr2").onclick = async () => {
+    const m = document.getElementById("gmsg");
+    try {
+      const l = await gh("progress");
+      const files = l ? (await l.json()).filter(f => f.name.endsWith(".json")) : [];
+      let best = null;
+      for (const f of files) {
+        const r = await gh(f.path, { headers: { Accept: "application/vnd.github.raw+json" } });
+        const st = JSON.parse(await r.text());
+        if (!best || (st.lastSync || "") > (best.lastSync || "")) best = st;
+      }
+      if (!best) { m.textContent = "No backups found yet."; return; }
+      const keep = { ghRepo: S.settings.ghRepo, ghToken: S.settings.ghToken }, dev = S.device;
+      S = Object.assign(blank(), best, { device: dev, settings: Object.assign(blank().settings, best.settings, keep) });
+      save();
+      m.textContent = `Restored the newest backup (synced ${new Date(best.lastSync).toLocaleString()}).`;
+    } catch (e) { m.textContent = "Restore failed: " + e.message; }
   };
   let armed = false;
   document.getElementById("wipe").onclick = e => {
