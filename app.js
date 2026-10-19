@@ -14,7 +14,7 @@ function load() {
   return blank();
 }
 function blank() {
-  return { cards: {}, answers: [], days: {}, ratings: {}, device: Math.random().toString(36).slice(2, 8), settings: { newPerDay: 20, typeAnswers: true, ghRepo: "NoUserFound000/cadet-cards", ghToken: "" } };
+  return { cards: {}, answers: [], log: [], days: {}, ratings: {}, device: Math.random().toString(36).slice(2, 8), settings: { newPerDay: 20, typeAnswers: true, ghRepo: "NoUserFound000/cadet-cards", ghToken: "" } };
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { alertBox("Could not save: storage is full or blocked."); }
@@ -47,7 +47,8 @@ function hash(s) {
   return (h >>> 0).toString(36);
 }
 function importAnkiText(text, fallbackDeck) {
-  let deck = fallbackDeck, tagCol = -1, sep = "\t", added = 0, updated = 0;
+  let deck = fallbackDeck, tagCol = -1, sep = "\t", added = 0, updated = 0, removed = 0;
+  const seen = new Set();
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     if (line.startsWith("#")) {
@@ -61,12 +62,15 @@ function importAnkiText(text, fallbackDeck) {
     if (f.length < 2) continue;
     const id = hash(deck + "|" + f[0]);
     const tags = tagCol >= 0 && f[tagCol] ? f[tagCol].trim().split(/\s+/) : [];
+    seen.add(id);
     const old = S.cards[id];
     if (old) { Object.assign(old, { front: f[0], back: f[1], tags, deck }); updated++; }
     else { S.cards[id] = { id, deck, front: f[0], back: f[1], tags, isNew: true, due: 0, ivl: 0, ease: 2.5, reps: 0, lapses: 0 }; added++; }
   }
+  // Cards dropped from a deck file are removed from that deck.
+  for (const c of Object.values(S.cards)) if (c.deck === deck && !seen.has(c.id)) { delete S.cards[c.id]; removed++; }
   save();
-  return { added, updated };
+  return { added, updated, removed };
 }
 function importBackup(text) {
   const s = JSON.parse(text);
@@ -127,7 +131,8 @@ let session = null;
 
 function go(name, arg) {
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.go === name));
-  ({ home, decks: deckView, answers, settings, review }[name])(arg);
+  clearInterval(timer);
+  ({ home, decks: deckView, log: logView, answers, settings, review }[name])(arg);
   window.scrollTo(0, 0);
 }
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => go(b.dataset.go));
@@ -167,38 +172,89 @@ function buildQueue(deck) {
 }
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
+// Target speaking time: ~2.5 words per second, kept between 10 and 30 seconds.
+function targetSecs(c) {
+  const words = strip(c.back.replace(/<small>[\s\S]*?<\/small>/g, "")).split(/\s+/).filter(Boolean).length;
+  return Math.max(10, Math.min(30, Math.round(words / 2.5 / 5) * 5));
+}
+let timer = null;
 function review(deck) {
+  clearInterval(timer);
   if (!session || session.deck !== deck) session = { deck, queue: buildQueue(deck), done: 0 };
   const c = session.queue[0];
-  if (!c) { session = null; if (S.settings.ghToken) sync(); V.innerHTML = `<h1>Session complete</h1><div class="card">Nice work. Streak: <b>${streak()}</b> day(s).</div><button class="primary" id="back">Back to Today</button>`; document.getElementById("back").onclick = () => go("home"); return; }
-  const typing = S.settings.typeAnswers;
+  if (!c) { session = null; if (S.settings.ghToken) sync(); V.innerHTML = `<h1>Session complete</h1><div class="card">Nice work. Streak: <b>${streak()}</b> day(s).</div><button class="primary" id="back">See today's log</button>`; document.getElementById("back").onclick = () => go("log"); return; }
+  const typing = S.settings.typeAnswers, target = targetSecs(c);
+  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
   V.innerHTML = `
     <div class="row eyebrow" style="margin-top:4px"><span>${esc(c.deck.split("::").pop())}</span><span>${session.queue.length} left</span></div>
     <div class="card">
       <div class="q">${clean(c.front)}</div>
-      ${typing ? `<textarea id="typed" placeholder="Say it out loud or type your answer (optional)"></textarea>` : ""}
+      <div class="row small"><span>Answer out loud in about <b>${target} s</b></span><span class="stat" style="font-size:22px" id="clock">0s</span></div>
+      <div class="bar"><div id="fill"></div></div>
+      ${typing ? `<textarea id="typed" placeholder="Speak, or type your answer here (optional)"></textarea>${Rec ? `<button id="mic" style="margin-top:6px">🎤 Dictate</button>` : ""}` : ""}
       <div id="ans" class="a hide">${clean(c.back)}</div>
     </div>
-    <button class="primary" id="show">Show answer</button>
+    <button class="primary" id="show">Done, show model answer</button>
     <div class="grades hide" id="grades">
       ${[["Again", 1], ["Hard", 2], ["Good", 3], ["Easy", 4]].map(([l, g]) => `<button class="g${g}" data-g="${g}">${l}<small>${preview(c, g)}</small></button>`).join("")}
     </div>
     <p class="tag">${c.tags.map(esc).join(" · ")}</p>`;
+  const t0 = Date.now(); let took = null;
+  const clock = document.getElementById("clock"), fill = document.getElementById("fill");
+  timer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    clock.textContent = s + "s";
+    fill.style.width = Math.min(100, s / target * 100) + "%";
+    fill.className = s > target + 5 ? "over" : "";
+  }, 250);
+  const mic = document.getElementById("mic");
+  if (mic) mic.onclick = () => {
+    const r = new Rec(); r.lang = "en-GB"; r.interimResults = true; r.continuous = true;
+    const box = document.getElementById("typed"), base = box.value ? box.value + " " : "";
+    r.onresult = e => { box.value = base + [...e.results].map(x => x[0].transcript).join(" "); };
+    r.onend = () => { mic.textContent = "🎤 Dictate"; };
+    try { r.start(); mic.textContent = "Listening… tap Done when finished"; } catch (e) {}
+    document.getElementById("show").addEventListener("click", () => r.stop(), { once: true });
+  };
   const show = document.getElementById("show");
   show.onclick = () => {
+    clearInterval(timer);
+    took = Math.round((Date.now() - t0) / 1000);
+    clock.textContent = `${took}s / ${target}s`;
     document.getElementById("ans").classList.remove("hide");
     document.getElementById("grades").classList.remove("hide");
     show.classList.add("hide");
   };
   document.querySelectorAll("#grades button").forEach(b => b.onclick = () => {
-    const g = +b.dataset.g;
+    const g = +b.dataset.g, at = new Date().toISOString();
     const t = document.getElementById("typed");
-    if (t && t.value.trim()) S.answers.push({ id: c.id, deck: c.deck, q: c.front, model: c.back, typed: t.value.trim(), grade: g, at: new Date().toISOString(), sent: false });
+    if (t && t.value.trim()) S.answers.push({ id: c.id, deck: c.deck, q: c.front, model: c.back, typed: t.value.trim(), grade: g, secs: took, target, at, sent: false });
+    S.log.push({ id: c.id, g, secs: took, target, at, day: today() });
     session.queue.shift();
     if (grade(c, g)) session.queue.splice(Math.min(session.queue.length, 3 + Math.floor(Math.random() * 3)), 0, c);
     save();
     review(deck);
   });
+}
+
+function logView() {
+  const byDay = {};
+  for (const e of S.log) (byDay[e.day] = byDay[e.day] || []).push(e);
+  const days = Object.keys(byDay).map(Number).sort((a, b) => b - a).slice(0, 30);
+  const label = d => { const t = today(); return d === t ? "Today" : d === t - 1 ? "Yesterday" : new Date(d * DAY).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" }); };
+  const G = ["", "Again", "Hard", "Good", "Easy"];
+  V.innerHTML = `
+    <div class="eyebrow">Review log</div>
+    <h1>What you finished</h1>
+    ${days.map(d => {
+      const es = byDay[d], timed = es.filter(e => e.secs != null);
+      const avg = timed.length ? Math.round(timed.reduce((n, e) => n + e.secs, 0) / timed.length) : null;
+      const good = es.filter(e => e.g >= 3).length;
+      return `<h2>${label(d)}</h2><div class="card">
+        <div class="row small"><span>${es.length} reviews · ${Math.round(good / es.length * 100)}% good or easy</span><span>${avg != null ? "avg " + avg + "s" : ""}</span></div>
+        ${es.slice().reverse().map(e => { const c = S.cards[e.id]; return `<div class="deck"><div><div>${c ? esc(strip(c.front)) : "(removed card)"}</div><div class="small">${c ? esc(c.deck.split("::").pop()) : ""} · ${new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${e.secs != null ? ` · ${e.secs}s of ${e.target}s` : ""}</div></div><span class="pill g${e.g}" style="color:#fff">${G[e.g]}</span></div>`; }).join("")}
+      </div>`;
+    }).join("") || `<p class="small">Nothing yet. Finished cards show up here, grouped by day.</p>`}`;
 }
 
 function deckView() {
@@ -225,7 +281,7 @@ function deckView() {
       const text = await f.text();
       try {
         if (f.name.endsWith(".json")) { importBackup(text); out.push(`${f.name}: backup restored`); }
-        else { const r = importAnkiText(text, f.name.replace(/\.\w+$/, "")); out.push(`${f.name}: ${r.added} new, ${r.updated} updated`); }
+        else { const r = importAnkiText(text, f.name.replace(/\.\w+$/, "")); out.push(`${f.name}: ${r.added} new, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ""}`); }
       } catch (err) { out.push(`${f.name}: ${err.message}`); }
     }
     deckView();

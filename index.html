@@ -42,6 +42,9 @@ nav button.on{color:var(--accent);font-weight:700;box-shadow:inset 0 2px 0 var(-
 .pill.due{background:var(--accent);color:var(--on-accent)}
 .tag{font-size:12px;color:var(--muted)}
 .chk{display:flex;gap:8px;align-items:center;margin:8px 0}
+.bar{height:4px;background:var(--panel2);border-radius:2px;margin:6px 0 10px;overflow:hidden}.bar div{height:100%;width:0;background:var(--gold2);transition:width .25s linear}.bar div.over{background:var(--again)}
+.pill.g1{background:var(--again)}.pill.g2{background:var(--hard)}.pill.g3{background:var(--good)}.pill.g4{background:var(--easy)}
+.deck .pill{align-self:center;flex:none;white-space:nowrap}
 .hide{display:none}
 </style>
 </head>
@@ -50,6 +53,7 @@ nav button.on{color:var(--accent);font-weight:700;box-shadow:inset 0 2px 0 var(-
 <nav>
   <button data-go="home" class="on">Today</button>
   <button data-go="decks">Decks</button>
+  <button data-go="log">Log</button>
   <button data-go="answers">Answers</button>
   <button data-go="settings">Settings</button>
 </nav>
