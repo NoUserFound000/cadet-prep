@@ -14,7 +14,7 @@ function load() {
   return blank();
 }
 function blank() {
-  return { cards: {}, answers: [], log: [], days: {}, ratings: {}, device: Math.random().toString(36).slice(2, 8), settings: { newPerDay: 20, typeAnswers: true, ghRepo: "NoUserFound000/cadet-cards", ghToken: "" } };
+  return { cards: {}, answers: [], log: [], days: {}, ratings: {}, pdfs: {}, pdfGone: [], device: Math.random().toString(36).slice(2, 8), settings: { newPerDay: 20, typeAnswers: true, ghRepo: "NoUserFound000/cadet-cards", ghToken: "" } };
 }
 function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { alertBox("Could not save: storage is full or blocked."); }
@@ -130,9 +130,10 @@ const V = document.getElementById("view");
 let session = null;
 
 function go(name, arg) {
-  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.go === name));
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.go === (name === "reader" ? "library" : name)));
   clearInterval(timer);
-  ({ home, decks: deckView, log: logView, answers, settings, review }[name])(arg);
+  closeReader();
+  ({ home, decks: deckView, library: libraryView, reader, log: logView, answers, settings, review }[name])(arg);
   window.scrollTo(0, 0);
 }
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => go(b.dataset.go));
@@ -355,13 +356,14 @@ async function sync() {
       const r = await gh(f.path, { headers: { Accept: "application/vnd.github.raw+json" } });
       if (r) { try { S.ratings[f.sha] = JSON.parse(await r.text()); newRatings++; } catch (e) {} }
     }
+    const lib = await runLibSync();
     S.lastSync = new Date().toISOString();
     save();
     // Back up this device's progress to the private repo.
     const bp = `progress/${S.device}.json`, cur = await gh(bp);
     const sha = cur ? (await cur.json()).sha : undefined;
     await gh(bp, { method: "PUT", body: JSON.stringify({ message: `Progress backup from ${S.device}`, content: b64(JSON.stringify(Object.assign({}, S, { settings: Object.assign({}, S.settings, { ghToken: "" }) }))), sha }) });
-    return `Synced: ${decksN} decks updated, ${sent} answers sent, ${newRatings} new rating sets, progress backed up.`;
+    return `Synced: ${decksN} decks updated, ${sent} answers sent, ${newRatings} new rating sets, progress backed up${lib ? ". Library: " + lib : ""}.`;
   } catch (e) { return "Sync failed: " + e.message; }
 }
 const strip = h => { const d = document.createElement("div"); d.innerHTML = clean(h); return d.textContent; };
@@ -430,7 +432,7 @@ function settings() {
   let armed = false;
   document.getElementById("wipe").onclick = e => {
     if (!armed) { armed = true; e.target.textContent = "Tap again to erase everything"; return; }
-    S = blank(); save(); go("home");
+    S = blank(); save(); fileClear().catch(() => {}); localIds = new Set(); go("home");
 if (S.settings.ghToken) sync().then(() => { if (!session && document.querySelector("nav .on").dataset.go === "home") home(); });
   };
 }
